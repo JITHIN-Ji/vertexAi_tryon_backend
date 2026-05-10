@@ -25,7 +25,6 @@ from google.genai.types import (
 )
 from google.oauth2 import service_account
 from dotenv import load_dotenv
-from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -92,36 +91,34 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize Google AI client: {e}")
     client = None
 
-# Initialize Supabase client
-supabase_client = None
-try:
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if supabase_url and supabase_key:
-        supabase_client = create_client(supabase_url, supabase_key)
-        logger.info("✅ Supabase client initialized")
-    else:
-        logger.warning("⚠️ Supabase credentials missing")
-except Exception as e:
-    logger.warning(f"⚠️ Supabase init failed: {e}")
-    supabase_client = None
-
 def save_screenshot_to_supabase(image_path: str, request_id: str):
-    """Save product screenshot to Supabase Storage"""
-    if not supabase_client:
-        return
+    """Save product screenshot to Supabase Storage via REST API - no supabase package needed"""
     try:
-        with open(image_path, 'rb') as f:
-            image_bytes = f.read()
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not supabase_key:
+            return
+
         from datetime import datetime
+        import requests as req
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
         filename = f"products/{date_str}_{request_id}.jpg"
-        supabase_client.storage.from_("tryon-screenshots").upload(
-            path=filename,
-            file=image_bytes,
-            file_options={"content-type": "image/jpeg"}
-        )
-        logger.info(f"✅ Screenshot saved: {filename}")
+
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+
+        url = f"{supabase_url}/storage/v1/object/tryon-screenshots/{filename}"
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "image/jpeg"
+        }
+        response = req.post(url, headers=headers, data=image_bytes, timeout=10)
+
+        if response.status_code in (200, 201):
+            logger.info(f"✅ Screenshot saved: {filename}")
+        else:
+            logger.warning(f"⚠️ Supabase returned {response.status_code}: {response.text}")
+
     except Exception as e:
         logger.warning(f"⚠️ Screenshot save failed (non-critical): {e}")
 
