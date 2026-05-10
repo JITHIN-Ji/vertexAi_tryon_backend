@@ -25,6 +25,7 @@ from google.genai.types import (
 )
 from google.oauth2 import service_account
 from dotenv import load_dotenv
+import google.generativeai as gemini_ai
 
 # Load environment variables
 load_dotenv()
@@ -55,8 +56,8 @@ processing_results = {}
 processing_lock = threading.Lock()
 
 # Enable CORS
-CORS(app, 
-     origins=['*'], 
+CORS(app,
+     origins=['*'],
      methods=['GET', 'POST', 'OPTIONS'],
      allow_headers=['Content-Type', 'Authorization'])
 
@@ -65,11 +66,95 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 ALLOWED_MIME_TYPES = {'image/jpeg', 'image/jpg', 'image/png', 'image/gif'}
 VALID_CATEGORIES = ['upper_body', 'lower_body', 'dresses']
 
-# Google AI Configuration
+# Google Vertex AI Configuration
 PROJECT_ID = os.getenv("PROJECT_ID", "poetic-chariot-471517-p8")
 LOCATION = os.getenv("LOCATION", "us-central1")
 
-# Initialize Google AI client
+# Gemini API key (for validation + extract-info)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Gemini validation prompt
+GEMINI_PROMPT = """
+You are a garment validator for a virtual try-on app running on Amazon product pages.
+
+You will receive a screenshot from the Amazon mobile app. Follow these steps strictly.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — IS THIS AN AMAZON PRODUCT PAGE WITH A CLOTHING ITEM?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This is always an Amazon product page screenshot. Check if the main product being sold is a clothing/wearable garment.
+
+Accepted clothing types (answer YES to Step 1):
+- Shirts, t-shirts, tops, blouses, kurtas, sarees, lehengas, kurtis
+- Pants, jeans, trousers, shorts, skirts, palazzos
+- Dresses, suits, jackets, coats, hoodies, sweaters, cardigans
+- Ethnic wear, sportswear, activewear, innerwear, swimwear, nightwear
+
+NOT clothing — reject these (answer NO to Step 1):
+- Shoes, sandals, slippers, boots (footwear only)
+- Bags, purses, wallets, backpacks (no clothing shown)
+- Jewelry, watches, sunglasses (accessories only)
+- Electronics, home decor, furniture, kitchen items, books, food
+- A search results page / category grid showing many products
+
+If Step 1 = NO → reply exactly: NO_GARMENT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — IDENTIFY THE PRIMARY GARMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+On this product page, there may be ONE main product photo shown large, and other items visible partially (e.g. a model wearing a shirt while showing pants, or a small accessory in the corner).
+
+Your job: identify which garment occupies the MOST space / is most dominant in the image.
+
+Rules:
+- The garment that takes up the largest area of the image is the PRIMARY garment.
+- Ignore partially visible items (less than 30% of image area).
+- If a model is wearing pants and only their torso/shirt is barely visible at the top edge, the PRIMARY garment is the pants.
+- If a model is wearing a t-shirt and the pants are only partially visible at the bottom, the PRIMARY garment is the t-shirt.
+- Focus only on the ONE dominant garment for all further checks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — IS THE PRIMARY GARMENT CLEARLY VISIBLE?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Check the PRIMARY garment identified in Step 2.
+
+PASSES (reply READY):
+- The garment occupies a significant portion of the image (30%+ of image area)
+- It is shown front-facing or at a slight angle
+- The full garment OR its most important front portion is clearly visible
+- It is on a model, mannequin, hanger, or flat-lay
+- It is reasonably well-lit and not severely blurry
+
+PARTIAL (reply PARTIAL_GARMENT):
+- The product IS a clothing item and it is the ONLY garment in the image
+- The garment style CAN be identified (you can tell what type of clothing it is)
+- BUT the garment is cut off at the edges — only the top half is showing, only the bottom half is showing, or the image is zoomed in too close
+- The full clothing item is NOT completely visible in the frame
+- Example: a kurta where the bottom is cut off, a dress where only the upper portion shows, pants where the waist area is missing
+
+FAILS (reply UNCLEAR_GARMENT):
+- The screenshot shows a REVIEWS section (star ratings, customer review text, "Top reviews" heading)
+- The screenshot shows a DESCRIPTION / ABOUT section (bullet points of product features, text only)
+- The screenshot shows a SIZE CHART section (measurement tables, size grids)
+- The screenshot shows a QUESTIONS & ANSWERS section (Q&A text content)
+- The screenshot shows a SPONSORED / RECOMMENDATIONS section (multiple small product thumbnails)
+- The screenshot shows a DELIVERY / RETURNS section (shipping info, return policy text)
+- The primary garment is tiny, very far away, or less than 30% of the image
+- The image is severely blurry, pixelated, or too dark to see garment details
+- The garment is only visible from the back with no front detail at all
+- The garment is so cropped that only a tiny fragment (just a collar, just a hem, just one sleeve tip) is visible and the garment type cannot be determined
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE RULES — CRITICAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Reply with ONLY one of these four — no other text, no explanation, no punctuation:
+    NO_GARMENT
+    UNCLEAR_GARMENT
+    PARTIAL_GARMENT
+    READY
+""".strip()
+
+# Initialize Vertex AI client
 client = None
 try:
     if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
@@ -79,9 +164,9 @@ try:
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
         client = genai.Client(
-            vertexai=True, 
-            project=PROJECT_ID, 
-            location=LOCATION, 
+            vertexai=True,
+            project=PROJECT_ID,
+            location=LOCATION,
             credentials=credentials
         )
         logger.info("Google AI client initialized successfully")
@@ -91,8 +176,13 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize Google AI client: {e}")
     client = None
 
+
+# ─────────────────────────────────────────────────────────────
+#  SUPABASE HELPERS
+# ─────────────────────────────────────────────────────────────
+
 def save_screenshot_to_supabase(image_path: str, request_id: str):
-    """Save product screenshot to Supabase Storage via REST API - no supabase package needed"""
+    """Save READY screenshots to products/ folder in Supabase"""
     try:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -122,33 +212,63 @@ def save_screenshot_to_supabase(image_path: str, request_id: str):
     except Exception as e:
         logger.warning(f"⚠️ Screenshot save failed (non-critical): {e}")
 
+
+def save_failed_screenshot_to_supabase(image_path: str, reason: str, request_id: str):
+    """Save FAILED/rejected screenshots to rejected/{reason}/ folder in Supabase"""
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not supabase_key:
+            return
+
+        from datetime import datetime
+        import requests as req
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        filename = f"rejected/{reason}/{date_str}_{request_id}.jpg"
+
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+
+        url = f"{supabase_url}/storage/v1/object/tryon-screenshots/{filename}"
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "image/jpeg"
+        }
+        response = req.post(url, headers=headers, data=image_bytes, timeout=10)
+
+        if response.status_code in (200, 201):
+            logger.info(f"✅ Failed screenshot saved: {filename}")
+        else:
+            logger.warning(f"⚠️ Supabase save failed: {response.status_code}: {response.text}")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed screenshot save error (non-critical): {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+#  FILE HELPERS
+# ─────────────────────────────────────────────────────────────
+
 def allowed_file(filename):
-    """Check if uploaded file has allowed extension"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
 def validate_image_file(file):
-    """Validate uploaded image file"""
     if not file or not file.filename:
         return False, "No file provided"
-    
     if not allowed_file(file.filename):
         return False, f"Invalid file format. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
-    
-    # Check file size by seeking to end
     file.seek(0, 2)
     file_size = file.tell()
     file.seek(0)
-    
     if file_size > app.config['MAX_CONTENT_LENGTH']:
         return False, "File too large. Maximum size is 16MB"
-    
     if file_size == 0:
         return False, "Empty file provided"
-    
     return True, "Valid file"
 
+
 def save_uploaded_file(file):
-    """Save uploaded file to temporary location and return path"""
     try:
         filename = secure_filename(f"{uuid.uuid4()}_{file.filename}")
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -158,6 +278,7 @@ def save_uploaded_file(file):
     except Exception as e:
         logger.error(f"Error saving file: {e}")
         return None
+
 
 def crop_product_from_screenshot(image_path: str) -> str:
     """Crop the product photo area from Amazon screenshot for Vertex AI"""
@@ -177,21 +298,20 @@ def crop_product_from_screenshot(image_path: str) -> str:
         logger.warning(f"Crop failed, using original: {e}")
         return image_path
 
+
 def pil_image_to_base64(pil_image):
-    """Convert PIL Image to base64 string"""
     try:
         buffer = BytesIO()
         if pil_image.mode != "RGB":
             pil_image = pil_image.convert("RGB")
         pil_image.save(buffer, format='PNG')
-        encoded_string = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        return encoded_string
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
     except Exception as e:
         logger.error(f"Error converting image to base64: {e}")
         raise
 
+
 def cleanup_files(file_paths):
-    """Clean up temporary files"""
     for file_path in file_paths:
         try:
             if file_path and os.path.exists(file_path):
@@ -200,8 +320,8 @@ def cleanup_files(file_paths):
         except Exception as e:
             logger.warning(f"Could not delete temp file {file_path}: {e}")
 
+
 def require_ai_client(f):
-    """Decorator to check if AI client is available"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not client:
@@ -213,19 +333,22 @@ def require_ai_client(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+# ─────────────────────────────────────────────────────────────
+#  BACKGROUND PROCESSING
+# ─────────────────────────────────────────────────────────────
+
 def process_try_on_background(request_id, person_path, clothing_path, garment_description, category):
-    """Process virtual try-on in background thread to prevent timeout"""
+    """Process virtual try-on in background thread"""
     cropped_path = None
     try:
         logger.info(f"[{request_id}] Starting background processing...")
-        
-        save_screenshot_to_supabase(clothing_path, request_id)
-        
+
         # Crop product area for Vertex AI
         cropped_path = crop_product_from_screenshot(clothing_path)
         logger.info(f"[{request_id}] Using cropped image for try-on: {cropped_path}")
-        
-        # Call Google Gemini Virtual Try-On API
+
+        # Call Vertex AI Virtual Try-On
         response = client.models.recontext_image(
             model="virtual-try-on-001",
             source=RecontextImageSource(
@@ -238,10 +361,9 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 safety_filter_level="BLOCK_LOW_AND_ABOVE",
             ),
         )
-        
+
         logger.info(f"[{request_id}] Google AI API call successful!")
-        
-        # Process the generated image
+
         if not response.generated_images:
             with processing_lock:
                 processing_results[request_id] = {
@@ -252,10 +374,10 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 }
             logger.error(f"[{request_id}] No images generated by API")
             return
-        
+
         result_image = typing.cast(PIL_Image.Image, response.generated_images[0].image._pil_image)
         output_base64 = pil_image_to_base64(result_image)
-        
+
         with processing_lock:
             processing_results[request_id] = {
                 'status': 'completed',
@@ -272,9 +394,9 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 },
                 'completed_at': time.time()
             }
-        
+
         logger.info(f"[{request_id}] Processing completed successfully")
-        
+
     except Exception as e:
         logger.error(f"[{request_id}] Error during background processing: {str(e)}")
         with processing_lock:
@@ -285,92 +407,197 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 'message': f'An error occurred during processing: {str(e)}'
             }
     finally:
-        # Always cleanup files including cropped version
         cleanup_files([person_path, clothing_path])
         if cropped_path and cropped_path != clothing_path:
             cleanup_files([cropped_path])
 
-# Error handlers
+
+# ─────────────────────────────────────────────────────────────
+#  ERROR HANDLERS
+# ─────────────────────────────────────────────────────────────
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
-    logger.warning("File upload too large")
-    return jsonify({
-        'success': False,
-        'error': 'File too large',
-        'message': 'Maximum file size is 16MB'
-    }), 413
+    return jsonify({'success': False, 'error': 'File too large', 'message': 'Maximum file size is 16MB'}), 413
 
 @app.errorhandler(404)
 def handle_not_found(e):
-    return jsonify({
-        'success': False,
-        'error': 'Endpoint not found',
-        'message': 'The requested endpoint does not exist'
-    }), 404
+    return jsonify({'success': False, 'error': 'Endpoint not found', 'message': 'The requested endpoint does not exist'}), 404
 
 @app.errorhandler(500)
 def handle_internal_error(e):
     logger.error(f"Internal server error: {e}")
-    return jsonify({
-        'success': False,
-        'error': 'Internal server error',
-        'message': 'An unexpected error occurred. Please try again later.'
-    }), 500
+    return jsonify({'success': False, 'error': 'Internal server error', 'message': 'An unexpected error occurred.'}), 500
 
 @app.errorhandler(405)
 def handle_method_not_allowed(e):
-    return jsonify({
-        'success': False,
-        'error': 'Method not allowed',
-        'message': 'The requested method is not allowed for this endpoint'
-    }), 405
+    return jsonify({'success': False, 'error': 'Method not allowed', 'message': 'The requested method is not allowed for this endpoint'}), 405
 
-# Routes
+
+# ─────────────────────────────────────────────────────────────
+#  ROUTES
+# ─────────────────────────────────────────────────────────────
+
 @app.route('/', methods=['GET'])
 def home():
-    """API documentation endpoint"""
     return jsonify({
         'message': 'Virtual Try-On API - Google Gemini Edition',
         'version': '1.0.0',
         'status': 'healthy' if client else 'unhealthy',
         'endpoints': {
-            '/': {
-                'method': 'GET',
-                'description': 'API documentation and status'
-            },
-            '/health': {
-                'method': 'GET',
-                'description': 'Check API health status'
-            },
-            '/try-on': {
-                'method': 'POST',
-                'description': 'Upload person and clothing images for virtual try-on',
-                'parameters': {
-                    'person_image': 'Image file of person (required)',
-                    'clothing_image': 'Image file of clothing (required)',
-                    'garment_description': 'Description of the garment (optional, default: "stylish clothing")',
-                    'category': 'Category: upper_body, lower_body, or dresses (optional, default: "upper_body")'
-                },
-                'accepted_formats': list(ALLOWED_EXTENSIONS),
-                'max_file_size': '16MB'
-            }
+            '/validate':     {'method': 'POST', 'description': 'Validate screenshot for clothing'},
+            '/extract-info': {'method': 'POST', 'description': 'Extract product name and brand'},
+            '/try-on':       {'method': 'POST', 'description': 'Start virtual try-on'},
+            '/try-on/status/<id>': {'method': 'GET', 'description': 'Poll try-on result'},
+            '/health':       {'method': 'GET',  'description': 'Health check'},
         },
         'model': 'virtual-try-on-001'
     })
 
+
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     status = 'healthy' if client else 'unhealthy'
-    message = 'API is running' if client else 'Google AI client not initialized'
-    
     return jsonify({
         'status': status,
-        'message': message,
+        'message': 'API is running' if client else 'Google AI client not initialized',
         'model': 'virtual-try-on-001',
-        'timestamp': str(int(__import__('time').time())),
+        'timestamp': str(int(time.time())),
         'version': '1.0.0'
     }), 200 if client else 503
+
+
+# ─────────────────────────────────────────────────────────────
+#  NEW: /validate
+# ─────────────────────────────────────────────────────────────
+
+@app.route('/validate', methods=['POST'])
+def validate_garment():
+    """Validate screenshot with Gemini — saves screenshots to Supabase"""
+    image_path = None
+    request_id = str(uuid.uuid4())
+    try:
+        if 'screenshot' not in request.files:
+            return jsonify({'result': 'ERROR', 'message': 'No screenshot provided'}), 400
+
+        screenshot = request.files['screenshot']
+        is_valid, msg = validate_image_file(screenshot)
+        if not is_valid:
+            return jsonify({'result': 'ERROR', 'message': msg}), 400
+
+        image_path = save_uploaded_file(screenshot)
+        if not image_path:
+            return jsonify({'result': 'ERROR', 'message': 'Failed to save file'}), 500
+
+        # Call Gemini
+        gemini_ai.configure(api_key=GEMINI_API_KEY)
+        model = gemini_ai.GenerativeModel("gemini-3.1-pro-preview")
+
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+
+        response = model.generate_content([
+            {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()},
+            GEMINI_PROMPT
+        ])
+
+        result_text = response.text.strip().upper().replace(".", "").replace("\n", "")
+        logger.info(f"[{request_id}] Gemini result: {result_text}")
+
+        if "NO_GARMENT" in result_text:
+            result = "NO_GARMENT"
+        elif "UNCLEAR_GARMENT" in result_text:
+            result = "UNCLEAR_GARMENT"
+        elif "PARTIAL_GARMENT" in result_text:
+            result = "PARTIAL_GARMENT"
+        elif "READY" in result_text:
+            result = "READY"
+        else:
+            result = "UNCLEAR_GARMENT"
+
+        # Save only failed/rejected screenshots to Supabase
+        if result != "READY":
+            save_failed_screenshot_to_supabase(image_path, result, request_id)
+
+        return jsonify({
+            'result': result,
+            'request_id': request_id
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Validate error: {e}")
+        if image_path:
+            save_failed_screenshot_to_supabase(image_path, "ERROR", request_id)
+        return jsonify({'result': 'ERROR', 'message': str(e)}), 500
+
+    finally:
+        cleanup_files([image_path])
+
+
+# ─────────────────────────────────────────────────────────────
+#  NEW: /extract-info
+# ─────────────────────────────────────────────────────────────
+
+@app.route('/extract-info', methods=['POST'])
+def extract_product_info():
+    """Extract product name and brand from Amazon screenshot"""
+    image_path = None
+    try:
+        if 'screenshot' not in request.files:
+            return jsonify({'product_name': 'Unknown', 'brand': 'Unknown'}), 200
+
+        screenshot = request.files['screenshot']
+        image_path = save_uploaded_file(screenshot)
+        if not image_path:
+            return jsonify({'product_name': 'Unknown', 'brand': 'Unknown'}), 200
+
+        gemini_ai.configure(api_key=GEMINI_API_KEY)
+        model = gemini_ai.GenerativeModel("gemini-3.1-pro-preview")
+
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+
+        prompt = """
+You are a product information extractor for a shopping app screenshot.
+Extract:
+1. PRODUCT_NAME: The clothing product name/title (max 6 words)
+2. BRAND: The brand or seller name
+
+If not found write UNKNOWN.
+Reply in EXACTLY this format only:
+PRODUCT_NAME: <name>
+BRAND: <brand>
+""".strip()
+
+        response = model.generate_content([
+            {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()},
+            prompt
+        ])
+
+        text = response.text.strip()
+        product_name = "Unknown"
+        brand = "Unknown"
+
+        for line in text.splitlines():
+            if line.startswith("PRODUCT_NAME:"):
+                product_name = line.split("PRODUCT_NAME:", 1)[1].strip() or "Unknown"
+            elif line.startswith("BRAND:"):
+                brand = line.split("BRAND:", 1)[1].strip() or "Unknown"
+
+        logger.info(f"Extracted: {product_name} / {brand}")
+        return jsonify({'product_name': product_name, 'brand': brand}), 200
+
+    except Exception as e:
+        logger.error(f"Extract info error: {e}")
+        return jsonify({'product_name': 'Unknown', 'brand': 'Unknown'}), 200
+
+    finally:
+        cleanup_files([image_path])
+
+
+# ─────────────────────────────────────────────────────────────
+#  EXISTING: /try-on
+# ─────────────────────────────────────────────────────────────
 
 @app.route('/try-on', methods=['POST'])
 @require_ai_client
@@ -379,67 +606,49 @@ def virtual_try_on():
     person_path = None
     clothing_path = None
     request_id = str(uuid.uuid4())
-    
+
     try:
-        # Validate request
         if 'person_image' not in request.files or 'clothing_image' not in request.files:
             return jsonify({
                 'success': False,
                 'error': 'Missing required files',
                 'message': 'Both person_image and clothing_image are required'
             }), 400
-        
+
         person_image = request.files['person_image']
         clothing_image = request.files['clothing_image']
         garment_description = request.form.get('garment_description', 'stylish clothing')
         category = request.form.get('category', 'upper_body')
-        
-        # Validate category
+
         if category not in VALID_CATEGORIES:
             return jsonify({
                 'success': False,
                 'error': 'Invalid category',
                 'message': f'Category must be one of: {", ".join(VALID_CATEGORIES)}'
             }), 400
-        
-        # Validate person image
+
         is_valid, message = validate_image_file(person_image)
         if not is_valid:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid person image',
-                'message': message
-            }), 400
-        
-        # Validate clothing image
+            return jsonify({'success': False, 'error': 'Invalid person image', 'message': message}), 400
+
         is_valid, message = validate_image_file(clothing_image)
         if not is_valid:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid clothing image',
-                'message': message
-            }), 400
-        
-        # Save files
+            return jsonify({'success': False, 'error': 'Invalid clothing image', 'message': message}), 400
+
         person_path = save_uploaded_file(person_image)
         clothing_path = save_uploaded_file(clothing_image)
-        
+
         if not person_path or not clothing_path:
-            return jsonify({
-                'success': False,
-                'error': 'File processing error',
-                'message': 'Failed to process uploaded files'
-            }), 500
-        
-        logger.info(f"[{request_id}] Processing try-on with category: {category}, description: {garment_description}")
-        
-        # Start async background processing
+            return jsonify({'success': False, 'error': 'File processing error', 'message': 'Failed to process uploaded files'}), 500
+
+        logger.info(f"[{request_id}] Processing try-on: category={category}")
+
         with processing_lock:
             processing_results[request_id] = {
                 'status': 'processing',
                 'started_at': time.time()
             }
-        
+
         executor.submit(
             process_try_on_background,
             request_id,
@@ -448,8 +657,7 @@ def virtual_try_on():
             garment_description,
             category
         )
-        
-        # Return immediately with request ID for polling
+
         return jsonify({
             'success': True,
             'message': 'Processing started',
@@ -457,21 +665,19 @@ def virtual_try_on():
             'status_url': f'/try-on/status/{request_id}',
             'note': 'Poll the status_url endpoint to get the result'
         }), 202
-        
+
     except Exception as e:
-        # Clean up files in case of error
         cleanup_files([person_path, clothing_path])
-        
-        logger.error(f"[{request_id}] Error during try-on request: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'Request processing failed',
-            'message': f'An error occurred: {str(e)}'
-        }), 500
+        logger.error(f"[{request_id}] Error: {str(e)}")
+        return jsonify({'success': False, 'error': 'Request processing failed', 'message': str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────
+#  EXISTING: /try-on/status
+# ─────────────────────────────────────────────────────────────
 
 @app.route('/try-on/status/<request_id>', methods=['GET'])
 def try_on_status(request_id):
-    """Check the status of a virtual try-on request"""
     with processing_lock:
         if request_id not in processing_results:
             return jsonify({
@@ -479,10 +685,8 @@ def try_on_status(request_id):
                 'error': 'Request not found',
                 'message': 'The specified request ID was not found or has expired'
             }), 404
-        
         result = processing_results[request_id].copy()
-    
-    # If still processing, return 202 Accepted
+
     if result.get('status') == 'processing':
         elapsed = time.time() - result.get('started_at', time.time())
         return jsonify({
@@ -491,41 +695,32 @@ def try_on_status(request_id):
             'message': f'Still processing ({elapsed:.1f}s elapsed)',
             'request_id': request_id
         }), 202
-    
-    # If completed, remove from cache and return full result
+
     if result.get('status') == 'completed':
         with processing_lock:
             processing_results.pop(request_id, None)
         return jsonify(result), 200
-    
-    # If failed, return error
+
     if result.get('status') == 'failed':
         with processing_lock:
             processing_results.pop(request_id, None)
         return jsonify(result), 500
-    
-    return jsonify({
-        'success': False,
-        'error': 'Unknown status',
-        'message': 'The request status is unknown'
-    }), 500
+
+    return jsonify({'success': False, 'error': 'Unknown status'}), 500
+
 
 @app.route('/favicon.ico')
 def favicon():
-    """Favicon endpoint to prevent 404 errors"""
     return '', 204
 
-# Production WSGI application
+
+# ─────────────────────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────────────────────
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     debug = os.getenv('FLASK_ENV') == 'development'
-    
     if not debug:
         logger.info("Starting production server...")
-    
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=debug,
-        threaded=True
-    )
+    app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
