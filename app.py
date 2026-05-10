@@ -159,6 +159,24 @@ def save_uploaded_file(file):
         logger.error(f"Error saving file: {e}")
         return None
 
+def crop_product_from_screenshot(image_path: str) -> str:
+    """Crop the product photo area from Amazon screenshot for Vertex AI"""
+    try:
+        img = PIL_Image.open(image_path)
+        width, height = img.size
+        top = int(height * 0.20)
+        bottom = int(height * 0.85)
+        cropped = img.crop((0, top, width, bottom))
+        cropped_path = image_path.replace('.jpg', '_cropped.jpg').replace('.jpeg', '_cropped.jpg')
+        if cropped.mode != 'RGB':
+            cropped = cropped.convert('RGB')
+        cropped.save(cropped_path, 'JPEG', quality=90)
+        logger.info(f"Cropped product area: {top}px to {bottom}px of {height}px total")
+        return cropped_path
+    except Exception as e:
+        logger.warning(f"Crop failed, using original: {e}")
+        return image_path
+
 def pil_image_to_base64(pil_image):
     """Convert PIL Image to base64 string"""
     try:
@@ -197,17 +215,22 @@ def require_ai_client(f):
 
 def process_try_on_background(request_id, person_path, clothing_path, garment_description, category):
     """Process virtual try-on in background thread to prevent timeout"""
+    cropped_path = None
     try:
         logger.info(f"[{request_id}] Starting background processing...")
         
-        save_screenshot_to_supabase(clothing_path, request_id)  
+        save_screenshot_to_supabase(clothing_path, request_id)
+        
+        # Crop product area for Vertex AI
+        cropped_path = crop_product_from_screenshot(clothing_path)
+        logger.info(f"[{request_id}] Using cropped image for try-on: {cropped_path}")
         
         # Call Google Gemini Virtual Try-On API
         response = client.models.recontext_image(
             model="virtual-try-on-001",
             source=RecontextImageSource(
                 person_image=Image.from_file(location=person_path),
-                product_images=[ProductImage(product_image=Image.from_file(location=clothing_path))],
+                product_images=[ProductImage(product_image=Image.from_file(location=cropped_path))],
             ),
             config=RecontextImageConfig(
                 output_mime_type="image/png",
@@ -262,8 +285,10 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 'message': f'An error occurred during processing: {str(e)}'
             }
     finally:
-        # Always cleanup files
+        # Always cleanup files including cropped version
         cleanup_files([person_path, clothing_path])
+        if cropped_path and cropped_path != clothing_path:
+            cleanup_files([cropped_path])
 
 # Error handlers
 @app.errorhandler(RequestEntityTooLarge)
