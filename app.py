@@ -25,6 +25,7 @@ from google.genai.types import (
 )
 from google.oauth2 import service_account
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -90,6 +91,39 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize Google AI client: {e}")
     client = None
+
+# Initialize Supabase client
+supabase_client = None
+try:
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if supabase_url and supabase_key:
+        supabase_client = create_client(supabase_url, supabase_key)
+        logger.info("✅ Supabase client initialized")
+    else:
+        logger.warning("⚠️ Supabase credentials missing")
+except Exception as e:
+    logger.warning(f"⚠️ Supabase init failed: {e}")
+    supabase_client = None
+
+def save_screenshot_to_supabase(image_path: str, request_id: str):
+    """Save product screenshot to Supabase Storage"""
+    if not supabase_client:
+        return
+    try:
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+        from datetime import datetime
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        filename = f"products/{date_str}_{request_id}.jpg"
+        supabase_client.storage.from_("tryon-screenshots").upload(
+            path=filename,
+            file=image_bytes,
+            file_options={"content-type": "image/jpeg"}
+        )
+        logger.info(f"✅ Screenshot saved: {filename}")
+    except Exception as e:
+        logger.warning(f"⚠️ Screenshot save failed (non-critical): {e}")
 
 def allowed_file(filename):
     """Check if uploaded file has allowed extension"""
@@ -168,6 +202,8 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
     """Process virtual try-on in background thread to prevent timeout"""
     try:
         logger.info(f"[{request_id}] Starting background processing...")
+        
+        save_screenshot_to_supabase(clothing_path, request_id)  
         
         # Call Google Gemini Virtual Try-On API
         response = client.models.recontext_image(
