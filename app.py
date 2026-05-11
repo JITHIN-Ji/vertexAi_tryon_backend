@@ -119,18 +119,22 @@ STEP 3 — IS THE PRIMARY GARMENT CLEARLY VISIBLE?
 Check the PRIMARY garment identified in Step 2.
 
 PASSES (reply READY):
-- The garment occupies a significant portion of the image (30%+ of image area)
+- At least 60% of the garment is visible in the screenshot
 - It is shown front-facing or at a slight angle
-- The full garment OR its most important front portion is clearly visible
 - It is on a model, mannequin, hanger, or flat-lay
 - It is reasonably well-lit and not severely blurry
+- NOTE: In Amazon mobile screenshots, UI elements naturally take space and models are often partially visible — this is normal and acceptable as long as 60% of the garment is visible
 
 PARTIAL (reply PARTIAL_GARMENT):
-- The product IS a clothing item and it is the ONLY garment in the image
-- The garment style CAN be identified (you can tell what type of clothing it is)
-- BUT the garment is cut off at the edges — only the top half is showing, only the bottom half is showing, or the image is zoomed in too close
-- The full clothing item is NOT completely visible in the frame
-- Example: a kurta where the bottom is cut off, a dress where only the upper portion shows, pants where the waist area is missing
+- The product IS a clothing item
+- The garment type CAN be identified (you can tell what type of clothing it is)
+- BUT less than 60% of the garment is visible in the screenshot
+- Examples of PARTIAL_GARMENT:
+  * Shirt visible only from chest to neck — bottom half missing
+  * Pants visible only below the knees — upper part missing
+  * Dress where only the top 30% is showing
+  * Only a sleeve or collar visible with no body of the garment
+  * Zoomed in so close that less than 60% of the full garment is in frame
 
 FAILS (reply UNCLEAR_GARMENT):
 - The screenshot shows a REVIEWS section (star ratings, customer review text, "Top reviews" heading)
@@ -139,10 +143,9 @@ FAILS (reply UNCLEAR_GARMENT):
 - The screenshot shows a QUESTIONS & ANSWERS section (Q&A text content)
 - The screenshot shows a SPONSORED / RECOMMENDATIONS section (multiple small product thumbnails)
 - The screenshot shows a DELIVERY / RETURNS section (shipping info, return policy text)
-- The primary garment is tiny, very far away, or less than 30% of the image
+- The primary garment is tiny or less than 30% of the image
 - The image is severely blurry, pixelated, or too dark to see garment details
 - The garment is only visible from the back with no front detail at all
-- The garment is so cropped that only a tiny fragment (just a collar, just a hem, just one sleeve tip) is visible and the garment type cannot be determined
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RESPONSE RULES — CRITICAL
