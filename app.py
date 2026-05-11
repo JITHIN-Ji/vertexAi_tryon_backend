@@ -555,7 +555,7 @@ def extract_product_info():
             return jsonify({'product_name': 'Unknown', 'brand': 'Unknown'}), 200
 
         gemini_ai.configure(api_key=GEMINI_API_KEY)
-        model = gemini_ai.GenerativeModel("gemini-3.1-pro-preview")
+        model = gemini_ai.GenerativeModel("gemini-2.5-flash")
 
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
