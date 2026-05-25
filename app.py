@@ -75,15 +75,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Gemini validation prompt
 GEMINI_PROMPT = """
-You are a garment validator for a virtual try-on app running on Amazon product pages.
+You are a garment validator for a virtual try-on app running on fashion shopping apps.
 
-You will receive a screenshot from the Amazon mobile app. Follow these steps strictly.
+You will receive a screenshot from a fashion shopping app (Amazon, Flipkart, Myntra, or Meesho). Follow these steps strictly.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 1 — IS THIS AN AMAZON PRODUCT PAGE WITH A CLOTHING ITEM?
+STEP 1 — IS THIS A FASHION APP PRODUCT PAGE WITH A CLOTHING ITEM?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This is always an Amazon product page screenshot. Check if the main product being sold is a clothing/wearable garment.
-
+This is always a product page screenshot from a fashion shopping app (Amazon, Flipkart, Myntra, or Meesho). Check if the main product being sold is a clothing/wearable garment.
 Accepted clothing types (answer YES to Step 1):
 - Shirts, t-shirts, tops, blouses, kurtas, sarees, lehengas, kurtis
 - Pants, jeans, trousers, shorts, skirts, palazzos
@@ -123,8 +122,7 @@ PASSES (reply READY):
 - It is shown front-facing or at a slight angle
 - It is on a model, mannequin, hanger, or flat-lay
 - It is reasonably well-lit and not severely blurry
-- NOTE: In Amazon mobile screenshots, UI elements naturally take space and models are often partially visible — this is normal and acceptable as long as 60% of the garment is visible
-
+- NOTE: In fashion app screenshots, UI elements naturally take space and models are often partially visible — this is normal and acceptable as long as 60% of the garment is visible
 PARTIAL (reply PARTIAL_GARMENT):
 - The product IS a clothing item
 - The garment type CAN be identified (you can tell what type of clothing it is)
@@ -543,7 +541,7 @@ def validate_garment():
 
 @app.route('/extract-info', methods=['POST'])
 def extract_product_info():
-    """Extract product name and brand from Amazon screenshot"""
+    """Extract product name and brand from fashion app screenshot"""
     image_path = None
     try:
         if 'screenshot' not in request.files:
