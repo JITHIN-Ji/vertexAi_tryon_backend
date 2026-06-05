@@ -55,6 +55,22 @@ executor = ThreadPoolExecutor(max_workers=3)
 processing_results = {}
 processing_lock = threading.Lock()
 
+def cleanup_old_results():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        with processing_lock:
+            expired = [
+                rid for rid, r in processing_results.items()
+                if r.get('status') in ('completed', 'failed')
+                and now - r.get('completed_at', now) > 60
+            ]
+            for rid in expired:
+                processing_results.pop(rid, None)
+                logger.info(f"Cleaned up expired result: {rid}")
+
+threading.Thread(target=cleanup_old_results, daemon=True).start()
+
 # Enable CORS
 CORS(app,
      origins=['*'],
@@ -213,37 +229,6 @@ def save_screenshot_to_supabase(image_path: str, request_id: str):
     except Exception as e:
         logger.warning(f"⚠️ Screenshot save failed (non-critical): {e}")
 
-
-def save_failed_screenshot_to_supabase(image_path: str, reason: str, request_id: str):
-    """Save FAILED/rejected screenshots to rejected/{reason}/ folder in Supabase"""
-    try:
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        if not supabase_url or not supabase_key:
-            return
-
-        from datetime import datetime
-        import requests as req
-        date_str = datetime.utcnow().strftime("%Y-%m-%d")
-        filename = f"rejected/{reason}/{date_str}_{request_id}.jpg"
-
-        with open(image_path, 'rb') as f:
-            image_bytes = f.read()
-
-        url = f"{supabase_url}/storage/v1/object/tryon-screenshots/{filename}"
-        headers = {
-            "Authorization": f"Bearer {supabase_key}",
-            "Content-Type": "image/jpeg"
-        }
-        response = req.post(url, headers=headers, data=image_bytes, timeout=10)
-
-        if response.status_code in (200, 201):
-            logger.info(f"✅ Failed screenshot saved: {filename}")
-        else:
-            logger.warning(f"⚠️ Supabase save failed: {response.status_code}: {response.text}")
-
-    except Exception as e:
-        logger.warning(f"⚠️ Failed screenshot save error (non-critical): {e}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -405,7 +390,8 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
                 'status': 'failed',
                 'success': False,
                 'error': 'Virtual try-on failed',
-                'message': f'An error occurred during processing: {str(e)}'
+                'message': f'An error occurred during processing: {str(e)}',
+                'completed_at': time.time()
             }
     finally:
         cleanup_files([person_path, clothing_path])
@@ -516,9 +502,7 @@ def validate_garment():
         else:
             result = "UNCLEAR_GARMENT"
 
-        # Save only failed/rejected screenshots to Supabase
-        if result != "READY":
-            save_failed_screenshot_to_supabase(image_path, result, request_id)
+        
 
         return jsonify({
             'result': result,
@@ -527,8 +511,6 @@ def validate_garment():
 
     except Exception as e:
         logger.error(f"Validate error: {e}")
-        if image_path:
-            save_failed_screenshot_to_supabase(image_path, "ERROR", request_id)
         return jsonify({'result': 'ERROR', 'message': str(e)}), 500
 
     finally:
@@ -698,8 +680,6 @@ def try_on_status(request_id):
         }), 202
 
     if result.get('status') == 'completed':
-        with processing_lock:
-            processing_results.pop(request_id, None)
         return jsonify(result), 200
 
     if result.get('status') == 'failed':
