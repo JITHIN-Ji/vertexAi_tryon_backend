@@ -344,7 +344,7 @@ def process_try_on_background(request_id, person_path, clothing_path, garment_de
             config=RecontextImageConfig(
                 output_mime_type="image/png",
                 number_of_images=1,
-                safety_filter_level="BLOCK_LOW_AND_ABOVE",
+                safety_filter_level="BLOCK_ONLY_HIGH",
             ),
         )
 
