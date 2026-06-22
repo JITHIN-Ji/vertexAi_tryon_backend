@@ -81,6 +81,8 @@ CORS(app,
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 ALLOWED_MIME_TYPES = {'image/jpeg', 'image/jpg', 'image/png', 'image/gif'}
 VALID_CATEGORIES = ['upper_body', 'lower_body', 'dresses']
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "amazon_screenshot_garmentimages")
+MAX_GARMENT_IMAGES = 10
 
 # Google Vertex AI Configuration
 PROJECT_ID = os.getenv("PROJECT_ID", "poetic-chariot-471517-p8")
@@ -198,13 +200,46 @@ except Exception as e:
 #  SUPABASE HELPERS
 # ─────────────────────────────────────────────────────────────
 
-def save_screenshot_to_supabase(image_path: str, request_id: str):
-    """Save READY screenshots to products/ folder in Supabase"""
+def count_garment_images_in_supabase():
+    """Count how many images already exist in the products/ folder"""
     try:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         if not supabase_url or not supabase_key:
-            return
+            return 0
+
+        import requests as req
+        url = f"{supabase_url}/storage/v1/object/list/{SUPABASE_BUCKET}"
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {"prefix": "products/", "limit": 1000}
+        response = req.post(url, headers=headers, json=payload, timeout=10)
+
+        if response.status_code == 200:
+            files = response.json()
+            return len([f for f in files if f.get('name')])
+        logger.warning(f"⚠️ Could not list bucket: {response.status_code}")
+        return 0
+    except Exception as e:
+        logger.warning(f"⚠️ Count check failed: {e}")
+        return 0
+
+
+def save_screenshot_to_supabase(image_path: str, request_id: str):
+    """Save READY screenshots to products/ folder — capped at MAX_GARMENT_IMAGES"""
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not supabase_key:
+            logger.warning("⚠️ Supabase credentials not set, skipping save")
+            return False
+
+        current_count = count_garment_images_in_supabase()
+        if current_count >= MAX_GARMENT_IMAGES:
+            logger.info(f"🛑 Bucket limit reached ({current_count}/{MAX_GARMENT_IMAGES}). Skipping upload.")
+            return False
 
         from datetime import datetime
         import requests as req
@@ -214,7 +249,7 @@ def save_screenshot_to_supabase(image_path: str, request_id: str):
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
 
-        url = f"{supabase_url}/storage/v1/object/tryon-screenshots/{filename}"
+        url = f"{supabase_url}/storage/v1/object/{SUPABASE_BUCKET}/{filename}"
         headers = {
             "Authorization": f"Bearer {supabase_key}",
             "Content-Type": "image/jpeg"
@@ -222,13 +257,14 @@ def save_screenshot_to_supabase(image_path: str, request_id: str):
         response = req.post(url, headers=headers, data=image_bytes, timeout=10)
 
         if response.status_code in (200, 201):
-            logger.info(f"✅ Screenshot saved: {filename}")
-        else:
-            logger.warning(f"⚠️ Supabase returned {response.status_code}: {response.text}")
+            logger.info(f"✅ Saved ({current_count + 1}/{MAX_GARMENT_IMAGES}): {filename}")
+            return True
+        logger.warning(f"⚠️ Supabase returned {response.status_code}: {response.text}")
+        return False
 
     except Exception as e:
         logger.warning(f"⚠️ Screenshot save failed (non-critical): {e}")
-
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -503,7 +539,8 @@ def validate_garment():
         else:
             result = "UNCLEAR_GARMENT"
 
-        
+        if result == "READY":
+            save_screenshot_to_supabase(image_path, request_id)
 
         return jsonify({
             'result': result,
