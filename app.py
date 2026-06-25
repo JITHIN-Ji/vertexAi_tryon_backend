@@ -25,8 +25,8 @@ from google.genai.types import (
 )
 from google.oauth2 import service_account
 from dotenv import load_dotenv
-import google.generativeai as gemini_ai
-
+from google import genai as gemini_ai
+from google.genai import types as genai_types
 # Load environment variables
 load_dotenv()
 
@@ -513,17 +513,18 @@ def validate_garment():
         if not image_path:
             return jsonify({'result': 'ERROR', 'message': 'Failed to save file'}), 500
 
-        # Call Gemini
-        gemini_ai.configure(api_key=GEMINI_API_KEY)
-        model = gemini_ai.GenerativeModel("gemini-2.5-flash")
+        gemini_client = gemini_ai.Client(api_key=GEMINI_API_KEY)
 
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
 
-        response = model.generate_content([
-            {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()},
-            GEMINI_PROMPT
-        ])
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                GEMINI_PROMPT
+            ]
+        )
 
         result_text = response.text.strip().upper().replace(".", "").replace("\n", "")
         logger.info(f"[{request_id}] Gemini result: {result_text}")
@@ -572,8 +573,7 @@ def extract_product_info():
         if not image_path:
             return jsonify({'product_name': 'Unknown', 'brand': 'Unknown'}), 200
 
-        gemini_ai.configure(api_key=GEMINI_API_KEY)
-        model = gemini_ai.GenerativeModel("gemini-2.5-flash")
+        gemini_client = gemini_ai.Client(api_key=GEMINI_API_KEY)
 
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
@@ -590,10 +590,13 @@ PRODUCT_NAME: <name>
 BRAND: <brand>
 """.strip()
 
-        response = model.generate_content([
-            {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()},
-            prompt
-        ])
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                prompt
+            ]
+        )
 
         text = response.text.strip()
         product_name = "Unknown"
