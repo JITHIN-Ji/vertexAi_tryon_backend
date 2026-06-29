@@ -44,13 +44,18 @@ def create_session(user_id: str) -> str:
 
 
 def update_validate(session_id: str, result: str, time_ms: int,
-                    tokens_in: int, tokens_out: int):
+                    tokens_in: int, tokens_out: int,
+                    product_title: str = None, product_brand: str = None,
+                    garment_class: str = None):
     try:
         data = {
             "validate_result":     result,
-             "validate_time_ms":    time_ms,
+            "validate_time_ms":    time_ms,
             "validate_tokens_in":  tokens_in,
             "validate_tokens_out": tokens_out,
+            "product_title":       product_title,
+            "product_brand":       product_brand,
+            "garment_class":       garment_class,
         }
         response = requests.patch(
             f"{SUPABASE_URL}/rest/v1/tryon_analytics"
@@ -59,11 +64,11 @@ def update_validate(session_id: str, result: str, time_ms: int,
             json=data,
             timeout=5
         )
-        # ← replace the if block with this:
         logger.warning(f"PATCH response: {response.status_code} | {response.text}")
     except Exception as e:
         logger.warning(f"update_validate error: {e}")
 
+        
 
 def update_tryon(session_id: str, status: str,
                  time_ms: int, error: str = None,

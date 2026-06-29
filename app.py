@@ -28,7 +28,8 @@ from dotenv import load_dotenv
 from google import genai as gemini_ai
 from google.genai import types as genai_types
 from analytics import create_session, update_validate, update_tryon, save_feedback
-
+import cv2
+from garment_extractor import extract_garment_by_class, composite_on_bg
 load_dotenv()
 
 logging.basicConfig(
@@ -78,85 +79,92 @@ PROJECT_ID = os.getenv("PROJECT_ID", "poetic-chariot-471517-p8")
 LOCATION = os.getenv("LOCATION", "us-central1")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-GEMINI_PROMPT = """
-You are a garment validator for a virtual try-on app running on fashion shopping apps.
+VALID_GARMENT_CLASSES = {
+    "short_sleeved_shirt", "long_sleeved_shirt", "short_sleeved_outwear",
+    "long_sleeved_outwear", "vest", "sling", "shorts", "trousers", "skirt",
+    "short_sleeved_dress", "long_sleeved_dress", "vest_dress", "sling_dress"
+}
 
-You will receive a screenshot from a fashion shopping app (Amazon, Flipkart, Myntra, or Meesho). Follow these steps strictly.
+GEMINI_PROMPT = """
+You are a garment validator AND product-info extractor for a virtual try-on app
+running on fashion shopping apps (Amazon, Flipkart, Myntra, Meesho).
+
+You are given TWO inputs:
+1. A SCREENSHOT image of a product page.
+2. A block of ACCESSIBILITY TEXT NODES extracted from the same screen, in the
+   order they appear top-to-bottom (this includes the product title, brand,
+   price, and other on-screen text — use it to read text that may be small,
+   cut off, or stylised in the image).
+
+Do the following steps IN ORDER.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1 — IS THIS A FASHION APP PRODUCT PAGE WITH A CLOTHING ITEM?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This is always a product page screenshot from a fashion shopping app (Amazon, Flipkart, Myntra, or Meesho). Check if the main product being sold is a clothing/wearable garment.
-Accepted clothing types (answer YES to Step 1):
-- Shirts, t-shirts, tops, blouses, kurtas, sarees, lehengas, kurtis
-- Pants, jeans, trousers, shorts, skirts, palazzos
-- Dresses, suits, jackets, coats, hoodies, sweaters, cardigans
-- Ethnic wear, sportswear, activewear, innerwear, swimwear, nightwear
+Check if the main product being sold is a clothing/wearable garment.
+Accepted (YES): shirts, t-shirts, tops, blouses, kurtas, sarees, lehengas,
+kurtis, pants, jeans, trousers, shorts, skirts, palazzos, dresses, suits,
+jackets, coats, hoodies, sweaters, cardigans, ethnic wear, sportswear,
+activewear, innerwear, swimwear, nightwear.
+NOT clothing (NO): shoes/sandals/boots, bags/wallets, jewelry/watches/
+sunglasses, electronics, home/kitchen/furniture, books, food, or a search
+results/category grid showing many products.
 
-NOT clothing — reject these (answer NO to Step 1):
-- Shoes, sandals, slippers, boots (footwear only)
-- Bags, purses, wallets, backpacks (no clothing shown)
-- Jewelry, watches, sunglasses (accessories only)
-- Electronics, home decor, furniture, kitchen items, books, food
-- A search results page / category grid showing many products
-
-If Step 1 = NO → reply exactly: NO_GARMENT
+If Step 1 = NO → result = "NO_GARMENT", set product_title, brand_name,
+garment_class to empty strings, skip Steps 2-5.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2 — IDENTIFY THE PRIMARY GARMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-On this product page, there may be ONE main product photo shown large, and other items visible partially (e.g. a model wearing a shirt while showing pants, or a small accessory in the corner).
-
-Your job: identify which garment occupies the MOST space / is most dominant in the image.
-
-Rules:
-- The garment that takes up the largest area of the image is the PRIMARY garment.
-- Ignore partially visible items (less than 30% of image area).
-- If a model is wearing pants and only their torso/shirt is barely visible at the top edge, the PRIMARY garment is the pants.
-- If a model is wearing a t-shirt and the pants are only partially visible at the bottom, the PRIMARY garment is the t-shirt.
-- Focus only on the ONE dominant garment for all further checks.
+There may be ONE main product photo shown large, plus other items partially
+visible. The PRIMARY garment is whichever takes up the most area / is most
+dominant in the image. Ignore items under 30% of image area. Focus only on
+this ONE garment for everything below.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 3 — IS THE PRIMARY GARMENT CLEARLY VISIBLE?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Check the PRIMARY garment identified in Step 2.
-
-PASSES (reply READY):
-- At least 60% of the garment is visible in the screenshot
-- It is shown front-facing or at a slight angle
-- It is on a model, mannequin, hanger, or flat-lay
-- It is reasonably well-lit and not severely blurry
-- NOTE: In fashion app screenshots, UI elements naturally take space and models are often partially visible — this is normal and acceptable as long as 60% of the garment is visible
-PARTIAL (reply PARTIAL_GARMENT):
-- The product IS a clothing item
-- The garment type CAN be identified (you can tell what type of clothing it is)
-- BUT less than 60% of the garment is visible in the screenshot
-- Examples of PARTIAL_GARMENT:
-  * Shirt visible only from chest to neck — bottom half missing
-  * Pants visible only below the knees — upper part missing
-  * Dress where only the top 30% is showing
-  * Only a sleeve or collar visible with no body of the garment
-  * Zoomed in so close that less than 60% of the full garment is in frame
-
-FAILS (reply UNCLEAR_GARMENT):
-- The screenshot shows a REVIEWS section (star ratings, customer review text, "Top reviews" heading)
-- The screenshot shows a DESCRIPTION / ABOUT section (bullet points of product features, text only)
-- The screenshot shows a SIZE CHART section (measurement tables, size grids)
-- The screenshot shows a QUESTIONS & ANSWERS section (Q&A text content)
-- The screenshot shows a SPONSORED / RECOMMENDATIONS section (multiple small product thumbnails)
-- The screenshot shows a DELIVERY / RETURNS section (shipping info, return policy text)
-- The primary garment is tiny or less than 30% of the image
-- The image is severely blurry, pixelated, or too dark to see garment details
-- The garment is only visible from the back with no front detail at all
+READY: at least 60% of the garment visible, front-facing or slight angle,
+on model/mannequin/hanger/flat-lay, reasonably lit, not severely blurry.
+PARTIAL_GARMENT: it IS clothing and you CAN tell the type, but less than 60%
+of it is visible (e.g. only chest-to-neck of a shirt, only below-knee of
+pants, only top 30% of a dress).
+UNCLEAR_GARMENT: page shows reviews / description-bullets / size chart /
+Q&A / sponsored-recommendations grid / delivery-returns text instead of the
+product photo, OR garment is under 30% of image, OR image too blurry/dark,
+OR only the back is visible with zero front detail.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RESPONSE RULES — CRITICAL
+STEP 4 — EXTRACT PRODUCT TITLE AND BRAND
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Reply with ONLY one of these four — no other text, no explanation, no punctuation:
-    NO_GARMENT
-    UNCLEAR_GARMENT
-    PARTIAL_GARMENT
-    READY
+Using BOTH the accessibility text nodes and the image:
+- product_title: the full product title exactly as shown on the page
+  (e.g. "Amazon Brand - Symbol Men's Cotton Shirt | Chinese Collar |
+  Casual"). It's usually the longest descriptive line near the top of the
+  text nodes or right under the brand link.
+- brand_name: the brand/seller name only (e.g. "Symbol", "Roadster", "H&M"),
+  often the node like "Visit the Symbol Store".
+Never invent text. If you can't confidently find one, return "" for it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5 — CLASSIFY THE PRIMARY GARMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pick EXACTLY ONE class from this fixed list using both the image and the
+title/text (pick whichever is the PRIMARY garment from Step 2, even on a
+combo/co-ord page):
+  short_sleeved_shirt, long_sleeved_shirt, short_sleeved_outwear,
+  long_sleeved_outwear, vest, sling, shorts, trousers, skirt,
+  short_sleeved_dress, long_sleeved_dress, vest_dress, sling_dress
+Guidance: kurti/kurta/tunic/blouse → shirt classes by sleeve length.
+Sarees/anarkalis/gowns/lehengas → whichever dress/skirt class best matches
+silhouette + sleeve length. If result is NO_GARMENT, garment_class = "".
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT — CRITICAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Reply with ONLY a single-line JSON object — no markdown, no code fences, no
+explanation:
+{"result": "...", "product_title": "...", "brand_name": "...", "garment_class": "..."}
 """.strip()
 
 client = None
@@ -181,9 +189,20 @@ except Exception as e:
     client = None
 
 
-# ─────────────────────────────────────────────────────────────
-#  SUPABASE — try-on result storage only
-# ─────────────────────────────────────────────────────────────
+YOLO_MODEL = None
+try:
+    from huggingface_hub import hf_hub_download
+    from ultralytics import YOLO
+    _model_path = hf_hub_download(
+        repo_id="Bingsu/adetailer",
+        filename="deepfashion2_yolov8s-seg.pt",
+    )
+    YOLO_MODEL = YOLO(_model_path)
+    logger.info("✅ DeepFashion2 YOLO model loaded")
+except Exception as e:
+    logger.error(f"❌ Failed to load DeepFashion2 model: {e}")
+    YOLO_MODEL = None
+
 
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "amazon_screenshot_garmentimages")
 
@@ -227,9 +246,6 @@ def save_tryon_images_to_supabase(
     except Exception as e:
         logger.warning(f"⚠️ save_tryon_images_to_supabase failed (non-critical): {e}")
 
-# ─────────────────────────────────────────────────────────────
-#  FILE HELPERS
-# ─────────────────────────────────────────────────────────────
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -262,22 +278,46 @@ def save_uploaded_file(file):
         return None
 
 
-def crop_product_from_screenshot(image_path: str) -> str:
+def prepare_garment_image(request_id: str, clothing_path: str, garment_class: str) -> str:
+    """
+    Runs DeepFashion2 (YOLO) on the screenshot, isolates the garment Gemini
+    identified (garment_class — falls back to largest-area mask if that
+    class wasn't detected), composites it on a clean off-white background,
+    and returns the path to THAT image for try-on.
+
+    If the model isn't loaded or nothing is detected, falls back to the
+    original full screenshot (no cropping logic at all anymore).
+    """
+    if YOLO_MODEL is None:
+        logger.warning(f"[{request_id}] YOLO model not loaded — using original screenshot")
+        return clothing_path
+
     try:
-        img = PIL_Image.open(image_path)
-        width, height = img.size
-        top = int(height * 0.20)
-        bottom = int(height * 0.85)
-        cropped = img.crop((0, top, width, bottom))
-        cropped_path = image_path.replace('.jpg', '_cropped.jpg').replace('.jpeg', '_cropped.jpg')
-        if cropped.mode != 'RGB':
-            cropped = cropped.convert('RGB')
-        cropped.save(cropped_path, 'JPEG', quality=90)
-        logger.info(f"Cropped product area: {top}px to {bottom}px of {height}px total")
-        return cropped_path
+        extraction = extract_garment_by_class(
+            clothing_path, YOLO_MODEL, garment_class=garment_class or None
+        )
+        garment_rgba = extraction.get("garment_image")
+
+        if garment_rgba is None:
+            logger.warning(f"[{request_id}] No garment detected by YOLO — using original screenshot")
+            return clothing_path
+
+        logger.info(
+            f"[{request_id}] DeepFashion2 isolated class={extraction['class_name']} "
+            f"used_fallback={extraction['used_fallback']}"
+        )
+
+        bg_image = composite_on_bg(garment_rgba)
+        extracted_path = (
+            clothing_path.replace('.jpg', '_garment.jpg').replace('.jpeg', '_garment.jpg')
+        )
+        cv2.imwrite(extracted_path, bg_image)
+        return extracted_path
+
     except Exception as e:
-        logger.warning(f"Crop failed, using original: {e}")
-        return image_path
+        logger.warning(f"[{request_id}] DeepFashion2 extraction failed ({e}) — using original screenshot")
+        return clothing_path
+
 
 
 def pil_image_to_base64(pil_image):
@@ -290,6 +330,25 @@ def pil_image_to_base64(pil_image):
     except Exception as e:
         logger.error(f"Error converting image to base64: {e}")
         raise
+
+
+def parse_gemini_json(raw_text: str) -> dict:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+    return {}
 
 
 def cleanup_files(file_paths):
@@ -315,18 +374,17 @@ def require_ai_client(f):
     return decorated_function
 
 
-# ─────────────────────────────────────────────────────────────
-#  BACKGROUND PROCESSING
-# ─────────────────────────────────────────────────────────────
+
 
 def process_try_on_background(request_id, person_path, clothing_path,
                                garment_description, category,
-                               session_id, user_id):
+                               session_id, user_id, garment_class=""):
     cropped_path = None
     start_ms = int(time.time() * 1000)
     try:
-        logger.info(f"[{request_id}] Starting background processing...")
-        cropped_path = crop_product_from_screenshot(clothing_path)
+        logger.info(f"[{request_id}] garment_class hint from validate: {garment_class!r}")
+        cropped_path = prepare_garment_image(request_id, clothing_path, garment_class)
+
 
         response = client.models.recontext_image(
             model="virtual-try-on-001",
@@ -387,7 +445,7 @@ def process_try_on_background(request_id, person_path, clothing_path,
                 'completed_at': time.time()
             }
 
-        # 🔄 Save to Supabase in background — user doesn't wait
+        
         def save_in_background():
             save_tryon_images_to_supabase(
                 garment_bytes=garment_bytes,
@@ -421,9 +479,7 @@ def process_try_on_background(request_id, person_path, clothing_path,
             cleanup_files([cropped_path])
 
 
-# ─────────────────────────────────────────────────────────────
-#  ERROR HANDLERS
-# ─────────────────────────────────────────────────────────────
+
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
@@ -443,9 +499,6 @@ def handle_method_not_allowed(e):
     return jsonify({'success': False, 'error': 'Method not allowed', 'message': 'The requested method is not allowed for this endpoint'}), 405
 
 
-# ─────────────────────────────────────────────────────────────
-#  ROUTES
-# ─────────────────────────────────────────────────────────────
 
 @app.route('/', methods=['GET'])
 def home():
@@ -475,9 +528,6 @@ def health_check():
     }), 200 if client else 503
 
 
-# ─────────────────────────────────────────────────────────────
-#  /validate  — Gemini garment check only
-# ─────────────────────────────────────────────────────────────
 
 
 @app.route('/validate', methods=['POST'])
@@ -505,40 +555,50 @@ def validate_garment():
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
 
+        text_nodes = request.form.get('text_nodes', '').strip()
+        text_nodes_block = (
+            f"\n\nACCESSIBILITY TEXT NODES (top to bottom):\n{text_nodes}\n"
+            if text_nodes else ""
+        )
+
         t0 = int(time.time() * 1000)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
                 genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                GEMINI_PROMPT
+                GEMINI_PROMPT + text_nodes_block
             ]
         )
         elapsed_ms = int(time.time() * 1000) - t0
 
-        result_text = response.text.strip().upper().replace(".", "").replace("\n", "")
-        logger.info(f"[{request_id}] Gemini result: {result_text}")
+        parsed = parse_gemini_json(response.text or "")
+        result = str(parsed.get("result", "UNCLEAR_GARMENT")).strip().upper()
+        if result not in {"NO_GARMENT", "UNCLEAR_GARMENT", "PARTIAL_GARMENT", "READY"}:
+            result = "UNCLEAR_GARMENT"
+
+        product_title = str(parsed.get("product_title", "") or "").strip()
+        brand_name    = str(parsed.get("brand_name", "") or "").strip()
+        garment_class = str(parsed.get("garment_class", "") or "").strip()
+        if garment_class not in VALID_GARMENT_CLASSES:
+            garment_class = ""
+
+        logger.info(f"[{request_id}] Gemini → result={result} title={product_title!r} "
+                    f"brand={brand_name!r} class={garment_class!r}")
 
         usage = response.usage_metadata
         tokens_in  = getattr(usage, 'prompt_token_count',     0) or 0
         tokens_out = getattr(usage, 'candidates_token_count', 0) or 0
 
-        if "NO_GARMENT" in result_text:
-            result = "NO_GARMENT"
-        elif "UNCLEAR_GARMENT" in result_text:
-            result = "UNCLEAR_GARMENT"
-        elif "PARTIAL_GARMENT" in result_text:
-            result = "PARTIAL_GARMENT"
-        elif "READY" in result_text:
-            result = "READY"
-        else:
-            result = "UNCLEAR_GARMENT"
-
-        update_validate(session_id, result, elapsed_ms, tokens_in, tokens_out)
+        update_validate(session_id, result, elapsed_ms, tokens_in, tokens_out,
+                         product_title, brand_name, garment_class)
 
         return jsonify({
             'result': result,
             'request_id': request_id,
-            'session_id': session_id      # ← pass back so try-on can link to same row
+            'session_id': session_id,
+            'product_title': product_title,
+            'product_brand': brand_name,
+            'garment_class': garment_class
         }), 200
 
     except Exception as e:
@@ -578,6 +638,7 @@ def virtual_try_on():
         clothing_image = request.files['clothing_image']
         garment_description = request.form.get('garment_description', 'stylish clothing')
         category            = request.form.get('category', 'upper_body')
+        garment_class = request.form.get('garment_class', '').strip()
 
         if category not in VALID_CATEGORIES:
             return jsonify({
@@ -617,7 +678,8 @@ def virtual_try_on():
             garment_description,
             category,
             session_id,
-            user_id
+            user_id,
+            garment_class 
         )
 
         return jsonify({
